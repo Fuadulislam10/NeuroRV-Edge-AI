@@ -96,37 +96,80 @@ A typical dense layer of size 784→256 runs in **~50 cycles** on the VPU vs. **
 
 ---
 
-## 📁 Repository Structure
+## Repository Structure
 
 ```
-neurorv-edge/
-├── rtl/                    # SystemVerilog RTL sources
-│   ├── neuro_rv_core.sv    # RV32IM 5-stage pipeline CPU
-│   ├── neuro_vector_unit.sv# 16-lane VPU with AI ops
-│   ├── neuro_interconnect.sv# AXI-lite arbiter + SRAM
-│   ├── neuro_power_manager.sv# DVFS + sleep state machine
-│   └── neuro_soc_top.sv    # SoC integration top-level
-├── firmware/               # Bare-metal C firmware
-│   ├── main.c              # MNIST inference demo + power demo
-│   ├── vpu_tests.c         # VPU test vectors
-│   └── linker.ld           # RV32 linker script
-├── tb/                     # Testbenches
-│   ├── tb_soc.sv           # SystemVerilog SoC testbench
-│   └── sim_main.cpp        # Verilator C++ harness
-├── scripts/                # Tool flow scripts
-│   ├── synth.tcl           # Yosys synthesis
-│   ├── pnr.tcl             # OpenROAD place & route
-│   └── sim.sh              # Simulation run script
-├── fpga/                   # FPGA-specific files
-│   ├── fpga_top.sv         # FPGA wrapper with PLLs
-│   └── constraints.xdc     # Xilinx XDC constraints
-├── docs/                   # Design documentation
-│   ├── architecture.md     # Detailed architecture doc
-│   ├── design_flow.md      # Tools & flow guide
-│   └── verification_plan.md# Verification strategy
-└── waveforms/              # VCD/FST waveform outputs
+neurorv_edge/
+├── README.md                    # This file
+├── LICENSE                      # Apache 2.0
+├── CONTRIBUTING.md
+├── CHANGELOG.md
+│
+├── rtl/                         # RTL Source (SystemVerilog)
+│   ├── core/                    # RV32IM CPU core
+│   │   ├── rv32im_core.sv       # Top-level CPU
+│   │   ├── if_stage.sv          # Instruction Fetch
+│   │   ├── id_stage.sv          # Instruction Decode
+│   │   ├── ex_stage.sv          # Execute
+│   │   ├── mem_stage.sv         # Memory Access
+│   │   ├── wb_stage.sv          # Write Back
+│   │   ├── pipeline_ctrl.sv     # Hazard/Forwarding
+│   │   ├── muldiv_unit.sv       # M-extension
+│   │   ├── csr_regfile.sv       # CSR registers
+│   │   └── regfile.sv           # Integer register file
+│   ├── accelerator/             # Vector AI Accelerator
+│   │   ├── vxu_top.sv           # VXU top
+│   │   ├── mac_array.sv         # 256-lane MAC
+│   │   ├── activation_unit.sv   # Activation functions
+│   │   ├── pooling_unit.sv      # Pooling ops
+│   │   ├── norm_unit.sv         # Normalization
+│   │   └── vxu_dma_ctrl.sv      # Local DMA
+│   ├── memory/                  # Memory subsystem
+│   │   ├── unified_sram.sv      # 512KB unified SRAM
+│   │   ├── axi_interconnect.sv  # AXI4 fabric
+│   │   └── dma_controller.sv    # 4-ch scatter-gather DMA
+│   ├── peripherals/             # IO subsystem
+│   │   ├── uart_16550.sv        # UART
+│   │   ├── spi_master.sv        # SPI master
+│   │   ├── i2c_master.sv        # I²C master
+│   │   ├── gpio_ctrl.sv         # GPIO 32-bit
+│   │   └── timer_unit.sv        # Timer/PWM
+│   ├── power/                   # Power management
+│   │   ├── pmu_top.sv           # PMU top
+│   │   ├── clock_ctrl.sv        # Clock gating/PLL ctrl
+│   │   └── retention_ctrl.sv    # State retention
+│   └── top/                     # SoC integration
+│       ├── neurorv_soc.sv        # SoC top-level
+│       └── chip_top.sv          # Padring + IO
+│
+├── firmware/                    # Embedded firmware (C)
+│   ├── bootloader/              # Stage-1/2 bootloader
+│   ├── hal/                     # Hardware abstraction
+│   ├── drivers/                 # Peripheral drivers
+│   ├── nn_runtime/              # Neural network runtime
+│   └── examples/                # Demo applications
+│
+├── tb/                          # Verification
+│   ├── core/                    # CPU unit tests
+│   ├── accelerator/             # VXU unit tests
+│   ├── integration/             # Sub-system tests
+│   └── system/                  # Full SoC regression
+│
+├── synthesis/                   # Synthesis flows
+│   ├── fpga/                    # FPGA targets
+│   └── asic/                    # ASIC targets
+│
+├── scripts/                     # Automation scripts
+│   ├── sim/                     # Simulation scripts
+│   ├── synth/                   # Synthesis helpers
+│   ├── lint/                    # Linting (Verilator/SpyGlass)
+│   └── formal/                  # Formal verification
+│
+└── docs/                        # Documentation
+    ├── arch/                    # Architecture specs
+    ├── datasheet/               # Register maps
+    └── tutorials/               # Getting started
 ```
-
 ---
 
 ## 🛠️ Prerequisites
