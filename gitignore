@@ -1,0 +1,79 @@
+# Build outputs
+build/
+obj_dir/
+*.o
+*.a
+*.so
+*.d
+
+# Simulation outputs
+*.vcd
+*.fst
+*.lxt
+*.lxt2
+waveforms/*.vcd
+waveforms/*.fst
+
+# Synthesis outputs
+synth/
+*.blif
+*.json
+*.asc
+*.bin
+*.bit
+
+# OpenROAD outputs
+results/
+logs/
+reports/
+*.odb
+*.def
+*.lef
+*.lib
+
+# Vivado / Quartus
+*.xpr
+*.xsa
+*.jou
+*.log
+vivado*/
+.Xil/
+ip_user_files/
+*.runs/
+*.cache/
+*.hw/
+*.ip_user_files/
+
+# RISC-V toolchain
+firmware/*.elf
+firmware/*.hex
+firmware/*.bin
+firmware/*.map
+firmware/*.lst
+*.elf
+*.hex
+*.bin
+*.map
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Verilator
+verilator_build/
+
+# Temp files
+*.tmp
+*.bak
+tmp/
+temp/
