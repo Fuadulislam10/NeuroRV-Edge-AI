@@ -1,6 +1,20 @@
 # NeuroRV Edge
 ### Hybrid RISC-V AI Accelerator SoC for Ultra-Low-Power Edge Intelligence
 
+```
+ ███╗   ██╗███████╗██╗   ██╗██████╗  ██████╗ ██████╗ ██╗   ██╗
+ ████╗  ██║██╔════╝██║   ██║██╔══██╗██╔═══██╗██╔══██╗██║   ██║
+ ██╔██╗ ██║█████╗  ██║   ██║██████╔╝██║   ██║██████╔╝██║   ██║
+ ██║╚██╗██║██╔══╝  ██║   ██║██╔══██╗██║   ██║██╔══██╗╚██╗ ██╔╝
+ ██║ ╚████║███████╗╚██████╔╝██║  ██║╚██████╔╝██║  ██║ ╚████╔╝
+ ╚═╝  ╚═══╝╚══════╝ ╚═════╝ ╚═╝  ╚═╝ ╚═════╝ ╚═╝  ╚═╝  ╚═══╝
+                     ███████╗██████╗  ██████╗ ███████╗
+                     ██╔════╝██╔══██╗██╔════╝ ██╔════╝
+                     █████╗  ██║  ██║██║  ███╗█████╗
+                     ██╔══╝  ██║  ██║██║   ██║██╔══╝
+                     ███████╗██████╔╝╚██████╔╝███████╗
+                     ╚══════╝╚═════╝  ╚═════╝ ╚══════╝
+```
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 [![Simulation](https://img.shields.io/badge/Sim-Verilator%204.x-green)](https://www.veripool.org/verilator/)
 [![Synthesis](https://img.shields.io/badge/Synth-Yosys-orange)](https://github.com/YosysHQ/yosys)
