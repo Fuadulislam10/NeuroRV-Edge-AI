@@ -1,496 +1,536 @@
-// ============================================================================
+// =============================================================================
 // FILE: rtl/memory/axi_interconnect.sv
-// PROJECT: NeuroRV Edge — Phase 4 Memory Subsystem
+// PROJECT: NeuroRV Edge SoC
 // MODULE: axi_interconnect
-// DESCRIPTION: Lightweight AXI4-Lite style 3-master → 1-slave interconnect.
-//
-//   Masters (in priority order):
-//     M0 = CPU      (highest)
-//     M1 = VXU      (medium)
-//     M2 = DMA      (lowest)
-//
-//   Slaves:
-//     S0 = UNIFIED SRAM   [SRAM_BASE .. SRAM_BASE + SRAM_SIZE - 1]
-//     (additional slave decode stubs for future peripherals)
-//
-//   AXI Channel Model (Lite, simplified):
-//     AW/W/B channels for writes  (address → data → response)
-//     AR/R   channels for reads   (address → data)
-//     Channels are register-sliced for timing closure.
-//
-//   Arbitration: Fixed priority round-robin with fairness counter.
-//     When no contention: whoever requests first gets the bus.
-//     When contention: M0 > M1 > M2 with starvation protection
-//     (a lower-priority master waiting > STARVE_LIMIT cycles
-//      gets one slot regardless of higher-priority pending).
-//
-//   Backpressure: Any master can be stalled via *_aw_ready / *_ar_ready.
-//
-// INTERFACE NOTES:
-//   - ADDR_W=32 (full 32-bit byte address)
-//   - DATA_W=32 (AXI-Lite mandates 32 or 64; using 32)
-//   - STRB_W=4  (byte strobes = DATA_W/8)
-//   - Response RRESP/BRESP: 2'b00=OKAY, 2'b10=SLVERR (unmapped)
-// ============================================================================
+// DESCRIPTION: Simplified AXI4-Lite style 3-master → 1-slave interconnect.
+//              Masters: CPU (M0, highest), VXU (M1), DMA (M2, lowest).
+//              Slave:   Unified SRAM.
+//              Features: Fixed-priority arbitration, backpressure, address
+//              decoding, read/write channel separation, debug counters.
+// SYNTHESIZABLE: Yes (Yosys + Verilator compatible)
+// =============================================================================
 
 `timescale 1ns/1ps
-`default_nettype none
 
 module axi_interconnect #(
-    parameter int ADDR_W       = 32,
-    parameter int DATA_W       = 32,
-    parameter int STARVE_LIMIT = 16,      // Starvation counter threshold
-    // Slave address map
-    parameter logic [ADDR_W-1:0] SRAM_BASE = 32'h2000_0000,
-    parameter logic [ADDR_W-1:0] SRAM_SIZE = 32'h0008_0000  // 512 KB
+    parameter int unsigned ADDR_WIDTH  = 32,
+    parameter int unsigned DATA_WIDTH  = 32,
+    parameter int unsigned STRB_WIDTH  = 4,   // DATA_WIDTH/8
+
+    // Slave address map: SRAM occupies [SRAM_BASE .. SRAM_BASE+SRAM_SIZE-1]
+    parameter logic [ADDR_WIDTH-1:0] SRAM_BASE = 32'h0000_0000,
+    parameter logic [ADDR_WIDTH-1:0] SRAM_SIZE = 32'h0008_0000  // 512KB
 )(
-    input  logic                clk,
-    input  logic                rst_n,
+    input  logic clk,
+    input  logic rst_n,
 
     // =========================================================================
-    // Master 0 — CPU (AXI4-Lite Slave port facing CPU)
+    // Master 0: CPU  (AXI4-Lite subordinate ports seen from master side)
     // =========================================================================
-    // Write address channel
-    input  logic                m0_aw_valid,
-    output logic                m0_aw_ready,
-    input  logic [ADDR_W-1:0]   m0_aw_addr,
-    input  logic [2:0]          m0_aw_prot,
-    // Write data channel
-    input  logic                m0_w_valid,
-    output logic                m0_w_ready,
-    input  logic [DATA_W-1:0]   m0_w_data,
-    input  logic [DATA_W/8-1:0] m0_w_strb,
-    // Write response channel
-    output logic                m0_b_valid,
-    input  logic                m0_b_ready,
-    output logic [1:0]          m0_b_resp,
-    // Read address channel
-    input  logic                m0_ar_valid,
-    output logic                m0_ar_ready,
-    input  logic [ADDR_W-1:0]   m0_ar_addr,
-    input  logic [2:0]          m0_ar_prot,
-    // Read data channel
-    output logic                m0_r_valid,
-    input  logic                m0_r_ready,
-    output logic [DATA_W-1:0]   m0_r_data,
-    output logic [1:0]          m0_r_resp,
+    // Write Address Channel
+    input  logic                    m0_awvalid,
+    output logic                    m0_awready,
+    input  logic [ADDR_WIDTH-1:0]   m0_awaddr,
+    input  logic [2:0]              m0_awprot,
+
+    // Write Data Channel
+    input  logic                    m0_wvalid,
+    output logic                    m0_wready,
+    input  logic [DATA_WIDTH-1:0]   m0_wdata,
+    input  logic [STRB_WIDTH-1:0]   m0_wstrb,
+
+    // Write Response Channel
+    output logic                    m0_bvalid,
+    input  logic                    m0_bready,
+    output logic [1:0]              m0_bresp,
+
+    // Read Address Channel
+    input  logic                    m0_arvalid,
+    output logic                    m0_arready,
+    input  logic [ADDR_WIDTH-1:0]   m0_araddr,
+    input  logic [2:0]              m0_arprot,
+
+    // Read Data Channel
+    output logic                    m0_rvalid,
+    input  logic                    m0_rready,
+    output logic [DATA_WIDTH-1:0]   m0_rdata,
+    output logic [1:0]              m0_rresp,
 
     // =========================================================================
-    // Master 1 — VXU (AXI4-Lite Slave port facing VXU)
+    // Master 1: VXU
     // =========================================================================
-    input  logic                m1_aw_valid,
-    output logic                m1_aw_ready,
-    input  logic [ADDR_W-1:0]   m1_aw_addr,
-    input  logic [2:0]          m1_aw_prot,
-    input  logic                m1_w_valid,
-    output logic                m1_w_ready,
-    input  logic [DATA_W-1:0]   m1_w_data,
-    input  logic [DATA_W/8-1:0] m1_w_strb,
-    output logic                m1_b_valid,
-    input  logic                m1_b_ready,
-    output logic [1:0]          m1_b_resp,
-    input  logic                m1_ar_valid,
-    output logic                m1_ar_ready,
-    input  logic [ADDR_W-1:0]   m1_ar_addr,
-    input  logic [2:0]          m1_ar_prot,
-    output logic                m1_r_valid,
-    input  logic                m1_r_ready,
-    output logic [DATA_W-1:0]   m1_r_data,
-    output logic [1:0]          m1_r_resp,
+    input  logic                    m1_awvalid,
+    output logic                    m1_awready,
+    input  logic [ADDR_WIDTH-1:0]   m1_awaddr,
+    input  logic [2:0]              m1_awprot,
+
+    input  logic                    m1_wvalid,
+    output logic                    m1_wready,
+    input  logic [DATA_WIDTH-1:0]   m1_wdata,
+    input  logic [STRB_WIDTH-1:0]   m1_wstrb,
+
+    output logic                    m1_bvalid,
+    input  logic                    m1_bready,
+    output logic [1:0]              m1_bresp,
+
+    input  logic                    m1_arvalid,
+    output logic                    m1_arready,
+    input  logic [ADDR_WIDTH-1:0]   m1_araddr,
+    input  logic [2:0]              m1_arprot,
+
+    output logic                    m1_rvalid,
+    input  logic                    m1_rready,
+    output logic [DATA_WIDTH-1:0]   m1_rdata,
+    output logic [1:0]              m1_rresp,
 
     // =========================================================================
-    // Master 2 — DMA (AXI4-Lite Slave port facing DMA)
+    // Master 2: DMA
     // =========================================================================
-    input  logic                m2_aw_valid,
-    output logic                m2_aw_ready,
-    input  logic [ADDR_W-1:0]   m2_aw_addr,
-    input  logic [2:0]          m2_aw_prot,
-    input  logic                m2_w_valid,
-    output logic                m2_w_ready,
-    input  logic [DATA_W-1:0]   m2_w_data,
-    input  logic [DATA_W/8-1:0] m2_w_strb,
-    output logic                m2_b_valid,
-    input  logic                m2_b_ready,
-    output logic [1:0]          m2_b_resp,
-    input  logic                m2_ar_valid,
-    output logic                m2_ar_ready,
-    input  logic [ADDR_W-1:0]   m2_ar_addr,
-    input  logic [2:0]          m2_ar_prot,
-    output logic                m2_r_valid,
-    input  logic                m2_r_ready,
-    output logic [DATA_W-1:0]   m2_r_data,
-    output logic [1:0]          m2_r_resp,
+    input  logic                    m2_awvalid,
+    output logic                    m2_awready,
+    input  logic [ADDR_WIDTH-1:0]   m2_awaddr,
+    input  logic [2:0]              m2_awprot,
+
+    input  logic                    m2_wvalid,
+    output logic                    m2_wready,
+    input  logic [DATA_WIDTH-1:0]   m2_wdata,
+    input  logic [STRB_WIDTH-1:0]   m2_wstrb,
+
+    output logic                    m2_bvalid,
+    input  logic                    m2_bready,
+    output logic [1:0]              m2_bresp,
+
+    input  logic                    m2_arvalid,
+    output logic                    m2_arready,
+    input  logic [ADDR_WIDTH-1:0]   m2_araddr,
+    input  logic [2:0]              m2_arprot,
+
+    output logic                    m2_rvalid,
+    input  logic                    m2_rready,
+    output logic [DATA_WIDTH-1:0]   m2_rdata,
+    output logic [1:0]              m2_rresp,
 
     // =========================================================================
-    // Slave 0 — SRAM (AXI4-Lite Master port facing SRAM controller)
+    // Slave: SRAM port (direct word-addressed interface to unified_sram)
     // =========================================================================
-    output logic                s0_aw_valid,
-    input  logic                s0_aw_ready,
-    output logic [ADDR_W-1:0]   s0_aw_addr,
-    output logic [2:0]          s0_aw_prot,
-    output logic                s0_w_valid,
-    input  logic                s0_w_ready,
-    output logic [DATA_W-1:0]   s0_w_data,
-    output logic [DATA_W/8-1:0] s0_w_strb,
-    input  logic                s0_b_valid,
-    output logic                s0_b_ready,
-    input  logic [1:0]          s0_b_resp,
-    output logic                s0_ar_valid,
-    input  logic                s0_ar_ready,
-    output logic [ADDR_W-1:0]   s0_ar_addr,
-    output logic [2:0]          s0_ar_prot,
-    input  logic                s0_r_valid,
-    output logic                s0_r_ready,
-    input  logic [DATA_W-1:0]   s0_r_data,
-    input  logic [1:0]          s0_r_resp,
+    output logic                    s_req,
+    output logic                    s_we,
+    output logic [16:0]             s_addr,         // word address (17-bit for 512KB)
+    output logic [DATA_WIDTH-1:0]   s_wdata,
+    output logic [STRB_WIDTH-1:0]   s_be,
+    input  logic [DATA_WIDTH-1:0]   s_rdata,
+    input  logic                    s_ack,
 
     // =========================================================================
     // Debug
     // =========================================================================
-    output logic [31:0]         dbg_arb_grant_count [0:2],  // Grants per master
-    output logic [31:0]         dbg_stall_count     [0:2],  // Stalls per master
-    output logic [31:0]         dbg_rd_txn_count,
-    output logic [31:0]         dbg_wr_txn_count,
-    output logic [31:0]         dbg_unmapped_count           // SLVERR count
+    output logic [31:0]             dbg_m0_wr_count,
+    output logic [31:0]             dbg_m0_rd_count,
+    output logic [31:0]             dbg_m1_wr_count,
+    output logic [31:0]             dbg_m1_rd_count,
+    output logic [31:0]             dbg_m2_wr_count,
+    output logic [31:0]             dbg_m2_rd_count,
+    output logic [31:0]             dbg_arb_stall_count,
+    output logic [7:0]              dbg_error_flags   // [7:4]=rd decode err, [3:0]=wr decode err
 );
 
-    localparam int STRB_W = DATA_W / 8;
-    localparam int NUM_MASTERS = 3;
+    // =========================================================================
+    // Internal Types
+    // =========================================================================
+    typedef enum logic [1:0] {
+        RESP_OKAY   = 2'b00,
+        RESP_EXOKAY = 2'b01,
+        RESP_SLVERR = 2'b10,
+        RESP_DECERR = 2'b11
+    } axi_resp_t;
+
+    typedef enum logic [1:0] {
+        ARB_IDLE = 2'b00,
+        ARB_M0   = 2'b01,
+        ARB_M1   = 2'b10,
+        ARB_M2   = 2'b11
+    } arb_state_t;
 
     // =========================================================================
-    // Address decode: is address in SRAM range?
+    // Address Decode
     // =========================================================================
-    function automatic logic addr_in_sram(input logic [ADDR_W-1:0] addr);
+    function automatic logic addr_in_sram(input logic [ADDR_WIDTH-1:0] addr);
         return (addr >= SRAM_BASE) && (addr < (SRAM_BASE + SRAM_SIZE));
     endfunction
 
-    // =========================================================================
-    // Write Arbiter State
-    // =========================================================================
-    typedef enum logic [1:0] {
-        WA_IDLE   = 2'h0,
-        WA_ACTIVE = 2'h1,
-        WA_RESP   = 2'h2
-    } wr_arb_state_t;
-
-    typedef enum logic [1:0] {
-        RA_IDLE   = 2'h0,
-        RA_ACTIVE = 2'h1,
-        RA_RESP   = 2'h2
-    } rd_arb_state_t;
-
-    wr_arb_state_t wr_state;
-    rd_arb_state_t rd_state;
-
-    logic [1:0]  wr_grant;    // Current write grant (0/1/2)
-    logic [1:0]  rd_grant;    // Current read grant  (0/1/2)
-    logic        wr_grant_valid;
-    logic        rd_grant_valid;
-
-    // Starvation counters per master
-    logic [7:0] wr_starve [0:NUM_MASTERS-1];
-    logic [7:0] rd_starve [0:NUM_MASTERS-1];
-
-    // Pending request vectors
-    logic [NUM_MASTERS-1:0] wr_req;
-    logic [NUM_MASTERS-1:0] rd_req;
-
-    assign wr_req[0] = m0_aw_valid && m0_w_valid;
-    assign wr_req[1] = m1_aw_valid && m1_w_valid;
-    assign wr_req[2] = m2_aw_valid && m2_w_valid;
-
-    assign rd_req[0] = m0_ar_valid;
-    assign rd_req[1] = m1_ar_valid;
-    assign rd_req[2] = m2_ar_valid;
-
-    // =========================================================================
-    // Arbitration function: fixed priority with starvation protection
-    // Returns 0/1/2 for granted master, or 3'b111 for no grant
-    // =========================================================================
-    function automatic logic [1:0] arb_select(
-        input logic [NUM_MASTERS-1:0] req,
-        input logic [7:0]             starve [0:NUM_MASTERS-1]
-    );
-        // Check starvation: any lower-priority master waiting too long?
-        if (req[2] && (starve[2] >= STARVE_LIMIT[7:0])) return 2'd2;
-        if (req[1] && (starve[1] >= STARVE_LIMIT[7:0])) return 2'd1;
-        // Normal priority
-        if (req[0]) return 2'd0;
-        if (req[1]) return 2'd1;
-        if (req[2]) return 2'd2;
-        return 2'd3; // no request
+    function automatic logic [16:0] to_word_addr(input logic [ADDR_WIDTH-1:0] addr);
+        return addr[18:2];   // byte→word: drop 2 LSBs, take 17 bits from SRAM window
     endfunction
 
     // =========================================================================
-    // Registered address/data buffers for winning master
+    // Write Arbitration State Machine
     // =========================================================================
-    logic [ADDR_W-1:0]  wr_addr_buf;
-    logic [2:0]         wr_prot_buf;
-    logic [DATA_W-1:0]  wr_data_buf;
-    logic [STRB_W-1:0]  wr_strb_buf;
-    logic               wr_mapped;    // 1 = address maps to SRAM
+    // Handles write-address + write-data channels atomically (AXI4-Lite
+    // guarantees AW and W arrive together or we buffer them).
+    // We use a simple latch: accept AW when both AW and W are valid.
 
-    logic [ADDR_W-1:0]  rd_addr_buf;
-    logic [2:0]         rd_prot_buf;
-    logic               rd_mapped;
+    arb_state_t wr_arb_state, wr_arb_next;
+    arb_state_t rd_arb_state, rd_arb_next;
 
-    // =========================================================================
-    // WRITE ARBITER FSM
-    // =========================================================================
-    always_ff @(posedge clk or negedge rst_n) begin
-        if (!rst_n) begin
-            wr_state       <= WA_IDLE;
-            wr_grant       <= '0;
-            wr_grant_valid <= 1'b0;
-            wr_addr_buf    <= '0;
-            wr_prot_buf    <= '0;
-            wr_data_buf    <= '0;
-            wr_strb_buf    <= '0;
-            wr_mapped      <= 1'b0;
-            for (int i = 0; i < NUM_MASTERS; i++) wr_starve[i] <= '0;
-            dbg_wr_txn_count <= '0;
-        end else begin
-            case (wr_state)
-                WA_IDLE: begin
-                    wr_grant_valid <= 1'b0;
-                    if (wr_req != '0) begin
-                        automatic logic [1:0] g;
-                        g = arb_select(wr_req, wr_starve);
-                        if (g != 2'd3) begin
-                            wr_grant       <= g;
-                            wr_grant_valid <= 1'b1;
-                            // Latch address/data from winning master
-                            case (g)
-                                2'd0: begin
-                                    wr_addr_buf <= m0_aw_addr;
-                                    wr_prot_buf <= m0_aw_prot;
-                                    wr_data_buf <= m0_w_data;
-                                    wr_strb_buf <= m0_w_strb;
-                                end
-                                2'd1: begin
-                                    wr_addr_buf <= m1_aw_addr;
-                                    wr_prot_buf <= m1_aw_prot;
-                                    wr_data_buf <= m1_w_data;
-                                    wr_strb_buf <= m1_w_strb;
-                                end
-                                default: begin
-                                    wr_addr_buf <= m2_aw_addr;
-                                    wr_prot_buf <= m2_aw_prot;
-                                    wr_data_buf <= m2_w_data;
-                                    wr_strb_buf <= m2_w_strb;
-                                end
-                            endcase
-                            wr_mapped <= addr_in_sram(
-                                g == 2'd0 ? m0_aw_addr :
-                                g == 2'd1 ? m1_aw_addr : m2_aw_addr);
-                            // Update starvation counters
-                            for (int i = 0; i < NUM_MASTERS; i++) begin
-                                if (i == int'(g)) wr_starve[i] <= '0;
-                                else if (wr_req[i]) wr_starve[i] <= wr_starve[i] + 1;
-                            end
-                            wr_state <= WA_ACTIVE;
-                            dbg_wr_txn_count <= dbg_wr_txn_count + 1;
-                        end
-                    end else begin
-                        // Decay starvation counters when idle
-                        for (int i = 0; i < NUM_MASTERS; i++)
-                            if (wr_starve[i] > 0) wr_starve[i] <= wr_starve[i] - 1;
-                    end
+    // Pending write request per master (latched when AW+W both valid)
+    logic [ADDR_WIDTH-1:0]  wr_addr  [0:2];
+    logic [DATA_WIDTH-1:0]  wr_data  [0:2];
+    logic [STRB_WIDTH-1:0]  wr_strb  [0:2];
+    logic                   wr_pend  [0:2];  // write request pending
+
+    logic [ADDR_WIDTH-1:0]  rd_addr  [0:2];
+    logic                   rd_pend  [0:2];  // read request pending
+
+    // Write data/response handshake per master
+    logic [2:0] wr_active;   // bitmask: which master is currently being served (write)
+    logic [2:0] rd_active;   // bitmask: which master is currently being served (read)
+
+    // -------------------------------------------------------------------------
+    // Capture write requests (AW+W simultaneous for AXI4-Lite)
+    // -------------------------------------------------------------------------
+    genvar gi;
+    generate
+        // Master 0 write capture
+        always_ff @(posedge clk or negedge rst_n) begin
+            if (!rst_n) begin
+                wr_pend[0] <= 1'b0;
+                wr_addr[0] <= {ADDR_WIDTH{1'b0}};
+                wr_data[0] <= {DATA_WIDTH{1'b0}};
+                wr_strb[0] <= {STRB_WIDTH{1'b0}};
+            end else begin
+                if (m0_awvalid && m0_awready && m0_wvalid && m0_wready) begin
+                    wr_addr[0] <= m0_awaddr;
+                    wr_data[0] <= m0_wdata;
+                    wr_strb[0] <= m0_wstrb;
+                    wr_pend[0] <= 1'b1;
+                end else if (wr_active[0] && s_ack) begin
+                    wr_pend[0] <= 1'b0;
                 end
-
-                WA_ACTIVE: begin
-                    // Wait for slave to accept the AW+W transaction
-                    if (s0_aw_ready && s0_w_ready && wr_mapped) begin
-                        wr_state <= WA_RESP;
-                    end else if (!wr_mapped) begin
-                        // Unmapped — generate SLVERR without forwarding
-                        wr_state <= WA_RESP;
-                    end
-                end
-
-                WA_RESP: begin
-                    // Wait for master to accept B response
-                    automatic logic m_b_ready_sel;
-                    m_b_ready_sel = (wr_grant == 2'd0) ? m0_b_ready :
-                                    (wr_grant == 2'd1) ? m1_b_ready : m2_b_ready;
-                    if (m_b_ready_sel) begin
-                        wr_state       <= WA_IDLE;
-                        wr_grant_valid <= 1'b0;
-                    end
-                end
-
-                default: wr_state <= WA_IDLE;
-            endcase
-        end
-    end
-
-    // =========================================================================
-    // READ ARBITER FSM
-    // =========================================================================
-    always_ff @(posedge clk or negedge rst_n) begin
-        if (!rst_n) begin
-            rd_state       <= RA_IDLE;
-            rd_grant       <= '0;
-            rd_grant_valid <= 1'b0;
-            rd_addr_buf    <= '0;
-            rd_prot_buf    <= '0;
-            rd_mapped      <= 1'b0;
-            for (int i = 0; i < NUM_MASTERS; i++) rd_starve[i] <= '0;
-            dbg_rd_txn_count   <= '0;
-            dbg_unmapped_count <= '0;
-        end else begin
-            case (rd_state)
-                RA_IDLE: begin
-                    rd_grant_valid <= 1'b0;
-                    if (rd_req != '0) begin
-                        automatic logic [1:0] g;
-                        g = arb_select(rd_req, rd_starve);
-                        if (g != 2'd3) begin
-                            rd_grant       <= g;
-                            rd_grant_valid <= 1'b1;
-                            case (g)
-                                2'd0: begin rd_addr_buf <= m0_ar_addr; rd_prot_buf <= m0_ar_prot; end
-                                2'd1: begin rd_addr_buf <= m1_ar_addr; rd_prot_buf <= m1_ar_prot; end
-                                default: begin rd_addr_buf <= m2_ar_addr; rd_prot_buf <= m2_ar_prot; end
-                            endcase
-                            rd_mapped <= addr_in_sram(
-                                g == 2'd0 ? m0_ar_addr :
-                                g == 2'd1 ? m1_ar_addr : m2_ar_addr);
-                            for (int i = 0; i < NUM_MASTERS; i++) begin
-                                if (i == int'(g)) rd_starve[i] <= '0;
-                                else if (rd_req[i]) rd_starve[i] <= rd_starve[i] + 1;
-                            end
-                            rd_state <= RA_ACTIVE;
-                            dbg_rd_txn_count <= dbg_rd_txn_count + 1;
-                            if (!addr_in_sram(
-                                g == 2'd0 ? m0_ar_addr :
-                                g == 2'd1 ? m1_ar_addr : m2_ar_addr))
-                                dbg_unmapped_count <= dbg_unmapped_count + 1;
-                        end
-                    end else begin
-                        for (int i = 0; i < NUM_MASTERS; i++)
-                            if (rd_starve[i] > 0) rd_starve[i] <= rd_starve[i] - 1;
-                    end
-                end
-
-                RA_ACTIVE: begin
-                    if ((s0_r_valid && rd_mapped) || !rd_mapped) begin
-                        rd_state <= RA_RESP;
-                    end
-                end
-
-                RA_RESP: begin
-                    automatic logic m_r_ready_sel;
-                    m_r_ready_sel = (rd_grant == 2'd0) ? m0_r_ready :
-                                    (rd_grant == 2'd1) ? m1_r_ready : m2_r_ready;
-                    if (m_r_ready_sel) begin
-                        rd_state       <= RA_IDLE;
-                        rd_grant_valid <= 1'b0;
-                    end
-                end
-
-                default: rd_state <= RA_IDLE;
-            endcase
-        end
-    end
-
-    // =========================================================================
-    // Debug grant counters
-    // =========================================================================
-    always_ff @(posedge clk or negedge rst_n) begin
-        if (!rst_n) begin
-            for (int i = 0; i < NUM_MASTERS; i++) begin
-                dbg_arb_grant_count[i] <= '0;
-                dbg_stall_count[i]     <= '0;
             end
+        end
+
+        // Master 1 write capture
+        always_ff @(posedge clk or negedge rst_n) begin
+            if (!rst_n) begin
+                wr_pend[1] <= 1'b0;
+                wr_addr[1] <= {ADDR_WIDTH{1'b0}};
+                wr_data[1] <= {DATA_WIDTH{1'b0}};
+                wr_strb[1] <= {STRB_WIDTH{1'b0}};
+            end else begin
+                if (m1_awvalid && m1_awready && m1_wvalid && m1_wready) begin
+                    wr_addr[1] <= m1_awaddr;
+                    wr_data[1] <= m1_wdata;
+                    wr_strb[1] <= m1_wstrb;
+                    wr_pend[1] <= 1'b1;
+                end else if (wr_active[1] && s_ack) begin
+                    wr_pend[1] <= 1'b0;
+                end
+            end
+        end
+
+        // Master 2 write capture
+        always_ff @(posedge clk or negedge rst_n) begin
+            if (!rst_n) begin
+                wr_pend[2] <= 1'b0;
+                wr_addr[2] <= {ADDR_WIDTH{1'b0}};
+                wr_data[2] <= {DATA_WIDTH{1'b0}};
+                wr_strb[2] <= {STRB_WIDTH{1'b0}};
+            end else begin
+                if (m2_awvalid && m2_awready && m2_wvalid && m2_wready) begin
+                    wr_addr[2] <= m2_awaddr;
+                    wr_data[2] <= m2_wdata;
+                    wr_strb[2] <= m2_wstrb;
+                    wr_pend[2] <= 1'b1;
+                end else if (wr_active[2] && s_ack) begin
+                    wr_pend[2] <= 1'b0;
+                end
+            end
+        end
+    endgenerate
+
+    // -------------------------------------------------------------------------
+    // Capture read requests
+    // -------------------------------------------------------------------------
+    always_ff @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            rd_pend[0] <= 1'b0; rd_addr[0] <= '0;
+            rd_pend[1] <= 1'b0; rd_addr[1] <= '0;
+            rd_pend[2] <= 1'b0; rd_addr[2] <= '0;
         end else begin
-            for (int i = 0; i < NUM_MASTERS; i++) begin
-                // Grant count: when a master wins arbitration
-                if (wr_grant_valid && wr_state == WA_IDLE && int'(wr_grant) == i)
-                    dbg_arb_grant_count[i] <= dbg_arb_grant_count[i] + 1;
-                // Stall: when master has a request but was not granted
-                if (wr_req[i] && wr_grant_valid && int'(wr_grant) != i)
-                    dbg_stall_count[i] <= dbg_stall_count[i] + 1;
+            if (m0_arvalid && m0_arready) begin
+                rd_addr[0] <= m0_araddr;
+                rd_pend[0] <= 1'b1;
+            end else if (rd_active[0] && s_ack) begin
+                rd_pend[0] <= 1'b0;
+            end
+
+            if (m1_arvalid && m1_arready) begin
+                rd_addr[1] <= m1_araddr;
+                rd_pend[1] <= 1'b1;
+            end else if (rd_active[1] && s_ack) begin
+                rd_pend[1] <= 1'b0;
+            end
+
+            if (m2_arvalid && m2_arready) begin
+                rd_addr[2] <= m2_araddr;
+                rd_pend[2] <= 1'b1;
+            end else if (rd_active[2] && s_ack) begin
+                rd_pend[2] <= 1'b0;
             end
         end
     end
 
     // =========================================================================
-    // Write channel output MUX — to slave S0
+    // AW/W Ready signals — accept when not already pending for that master
     // =========================================================================
-    assign s0_aw_valid = wr_grant_valid && (wr_state == WA_ACTIVE) && wr_mapped;
-    assign s0_aw_addr  = wr_addr_buf;
-    assign s0_aw_prot  = wr_prot_buf;
-    assign s0_w_valid  = wr_grant_valid && (wr_state == WA_ACTIVE) && wr_mapped;
-    assign s0_w_data   = wr_data_buf;
-    assign s0_w_strb   = wr_strb_buf;
-    assign s0_b_ready  = (wr_state == WA_RESP) && wr_mapped;
+    assign m0_awready = ~wr_pend[0];
+    assign m0_wready  = ~wr_pend[0];
+    assign m1_awready = ~wr_pend[1];
+    assign m1_wready  = ~wr_pend[1];
+    assign m2_awready = ~wr_pend[2];
+    assign m2_wready  = ~wr_pend[2];
 
-    // Read channel output MUX — to slave S0
-    assign s0_ar_valid = rd_grant_valid && (rd_state == RA_ACTIVE) && rd_mapped;
-    assign s0_ar_addr  = rd_addr_buf;
-    assign s0_ar_prot  = rd_prot_buf;
-    assign s0_r_ready  = (rd_state == RA_RESP) && rd_mapped;
+    assign m0_arready = ~rd_pend[0];
+    assign m1_arready = ~rd_pend[1];
+    assign m2_arready = ~rd_pend[2];
 
     // =========================================================================
-    // Master ready signals — back-pressure
-    // M*_aw_ready / M*_w_ready: only when this master holds the grant
+    // Write Arbitration FSM (Fixed Priority: M0 > M1 > M2)
     // =========================================================================
-    assign m0_aw_ready = (wr_state == WA_IDLE) && (arb_select(wr_req, wr_starve) == 2'd0);
-    assign m0_w_ready  = m0_aw_ready;
-    assign m1_aw_ready = (wr_state == WA_IDLE) && (arb_select(wr_req, wr_starve) == 2'd1);
-    assign m1_w_ready  = m1_aw_ready;
-    assign m2_aw_ready = (wr_state == WA_IDLE) && (arb_select(wr_req, wr_starve) == 2'd2);
-    assign m2_w_ready  = m2_aw_ready;
+    always_ff @(posedge clk or negedge rst_n) begin
+        if (!rst_n) wr_arb_state <= ARB_IDLE;
+        else        wr_arb_state <= wr_arb_next;
+    end
 
-    assign m0_ar_ready = (rd_state == RA_IDLE) && (arb_select(rd_req, rd_starve) == 2'd0);
-    assign m1_ar_ready = (rd_state == RA_IDLE) && (arb_select(rd_req, rd_starve) == 2'd1);
-    assign m2_ar_ready = (rd_state == RA_IDLE) && (arb_select(rd_req, rd_starve) == 2'd2);
+    always_comb begin
+        wr_arb_next = wr_arb_state;
+        case (wr_arb_state)
+            ARB_IDLE: begin
+                if      (wr_pend[0]) wr_arb_next = ARB_M0;
+                else if (wr_pend[1]) wr_arb_next = ARB_M1;
+                else if (wr_pend[2]) wr_arb_next = ARB_M2;
+            end
+            ARB_M0: if (s_ack) wr_arb_next = ARB_IDLE;
+            ARB_M1: if (s_ack) wr_arb_next = ARB_IDLE;
+            ARB_M2: if (s_ack) wr_arb_next = ARB_IDLE;
+            default: wr_arb_next = ARB_IDLE;
+        endcase
+    end
 
-    // =========================================================================
-    // Write response MUX — route B channel back to winning master
-    // =========================================================================
-    logic [1:0] b_resp_mux;
-    assign b_resp_mux = wr_mapped ? s0_b_resp : 2'b10; // SLVERR on unmapped
-
-    assign m0_b_valid = (wr_grant == 2'd0) && (wr_state == WA_RESP);
-    assign m0_b_resp  = b_resp_mux;
-    assign m1_b_valid = (wr_grant == 2'd1) && (wr_state == WA_RESP);
-    assign m1_b_resp  = b_resp_mux;
-    assign m2_b_valid = (wr_grant == 2'd2) && (wr_state == WA_RESP);
-    assign m2_b_resp  = b_resp_mux;
-
-    // =========================================================================
-    // Read response MUX — route R channel back to winning master
-    // =========================================================================
-    logic [DATA_W-1:0] r_data_mux;
-    logic [1:0]        r_resp_mux;
-    assign r_data_mux = rd_mapped ? s0_r_data : '0;
-    assign r_resp_mux = rd_mapped ? s0_r_resp : 2'b10;
-
-    assign m0_r_valid = (rd_grant == 2'd0) && (rd_state == RA_RESP);
-    assign m0_r_data  = r_data_mux;
-    assign m0_r_resp  = r_resp_mux;
-    assign m1_r_valid = (rd_grant == 2'd1) && (rd_state == RA_RESP);
-    assign m1_r_data  = r_data_mux;
-    assign m1_r_resp  = r_resp_mux;
-    assign m2_r_valid = (rd_grant == 2'd2) && (rd_state == RA_RESP);
-    assign m2_r_data  = r_data_mux;
-    assign m2_r_resp  = r_resp_mux;
+    assign wr_active[0] = (wr_arb_state == ARB_M0);
+    assign wr_active[1] = (wr_arb_state == ARB_M1);
+    assign wr_active[2] = (wr_arb_state == ARB_M2);
 
     // =========================================================================
-    // Assertions
+    // Read Arbitration FSM (Fixed Priority: M0 > M1 > M2)
     // =========================================================================
-    // synthesis translate_off
-    always @(posedge clk) begin
-        // No two masters should be granted simultaneously
-        if (wr_grant_valid) begin
-            assert (wr_grant < NUM_MASTERS)
-                else $fatal(1, "axi_interconnect: invalid wr_grant %0d", wr_grant);
+    always_ff @(posedge clk or negedge rst_n) begin
+        if (!rst_n) rd_arb_state <= ARB_IDLE;
+        else        rd_arb_state <= rd_arb_next;
+    end
+
+    always_comb begin
+        rd_arb_next = rd_arb_state;
+        case (rd_arb_state)
+            ARB_IDLE: begin
+                if      (rd_pend[0]) rd_arb_next = ARB_M0;
+                else if (rd_pend[1]) rd_arb_next = ARB_M1;
+                else if (rd_pend[2]) rd_arb_next = ARB_M2;
+            end
+            ARB_M0: if (s_ack) rd_arb_next = ARB_IDLE;
+            ARB_M1: if (s_ack) rd_arb_next = ARB_IDLE;
+            ARB_M2: if (s_ack) rd_arb_next = ARB_IDLE;
+            default: rd_arb_next = ARB_IDLE;
+        endcase
+    end
+
+    assign rd_active[0] = (rd_arb_state == ARB_M0);
+    assign rd_active[1] = (rd_arb_state == ARB_M1);
+    assign rd_active[2] = (rd_arb_state == ARB_M2);
+
+    // =========================================================================
+    // Slave SRAM Drive
+    // Write channel has priority over read when both ready (write-first policy).
+    // =========================================================================
+    logic wr_grant;
+    logic rd_grant;
+
+    assign wr_grant = |wr_active;   // any write master active
+    assign rd_grant = |rd_active & ~wr_grant; // read only when no write pending
+
+    // Mux selected write master
+    logic [ADDR_WIDTH-1:0] sel_wr_addr;
+    logic [DATA_WIDTH-1:0] sel_wr_data;
+    logic [STRB_WIDTH-1:0] sel_wr_strb;
+
+    always_comb begin
+        sel_wr_addr = wr_addr[0];
+        sel_wr_data = wr_data[0];
+        sel_wr_strb = wr_strb[0];
+        if      (wr_active[0]) begin sel_wr_addr = wr_addr[0]; sel_wr_data = wr_data[0]; sel_wr_strb = wr_strb[0]; end
+        else if (wr_active[1]) begin sel_wr_addr = wr_addr[1]; sel_wr_data = wr_data[1]; sel_wr_strb = wr_strb[1]; end
+        else if (wr_active[2]) begin sel_wr_addr = wr_addr[2]; sel_wr_data = wr_data[2]; sel_wr_strb = wr_strb[2]; end
+    end
+
+    // Mux selected read master
+    logic [ADDR_WIDTH-1:0] sel_rd_addr;
+    always_comb begin
+        sel_rd_addr = rd_addr[0];
+        if      (rd_active[0]) sel_rd_addr = rd_addr[0];
+        else if (rd_active[1]) sel_rd_addr = rd_addr[1];
+        else if (rd_active[2]) sel_rd_addr = rd_addr[2];
+    end
+
+    // Address decode
+    logic wr_decode_ok;
+    logic rd_decode_ok;
+    assign wr_decode_ok = addr_in_sram(sel_wr_addr);
+    assign rd_decode_ok = addr_in_sram(sel_rd_addr);
+
+    // Drive slave
+    always_comb begin
+        s_req   = 1'b0;
+        s_we    = 1'b0;
+        s_addr  = 17'h0;
+        s_wdata = {DATA_WIDTH{1'b0}};
+        s_be    = {STRB_WIDTH{1'b0}};
+
+        if (wr_grant && wr_decode_ok) begin
+            s_req   = 1'b1;
+            s_we    = 1'b1;
+            s_addr  = to_word_addr(sel_wr_addr);
+            s_wdata = sel_wr_data;
+            s_be    = sel_wr_strb;
+        end else if (rd_grant && rd_decode_ok) begin
+            s_req   = 1'b1;
+            s_we    = 1'b0;
+            s_addr  = to_word_addr(sel_rd_addr);
+            s_wdata = {DATA_WIDTH{1'b0}};
+            s_be    = {STRB_WIDTH{1'bx}};
         end
     end
-    // synthesis translate_on
+
+    // =========================================================================
+    // Write Response Back to Masters
+    // =========================================================================
+    // B channel fires one cycle after s_ack on a write
+    logic wr_resp_valid [0:2];
+    logic [1:0] wr_resp_code [0:2];
+
+    always_ff @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            for (int i = 0; i < 3; i++) begin
+                wr_resp_valid[i] <= 1'b0;
+                wr_resp_code[i]  <= 2'b00;
+            end
+        end else begin
+            for (int i = 0; i < 3; i++) begin
+                if (wr_active[i] && s_ack) begin
+                    wr_resp_valid[i] <= 1'b1;
+                    wr_resp_code[i]  <= wr_decode_ok ? RESP_OKAY : RESP_DECERR;
+                end else if (wr_resp_valid[i]) begin
+                    // Clear when master accepts response
+                    case (i)
+                        0: if (m0_bready) wr_resp_valid[i] <= 1'b0;
+                        1: if (m1_bready) wr_resp_valid[i] <= 1'b0;
+                        2: if (m2_bready) wr_resp_valid[i] <= 1'b0;
+                        default: wr_resp_valid[i] <= 1'b0;
+                    endcase
+                end
+            end
+        end
+    end
+
+    assign m0_bvalid = wr_resp_valid[0];
+    assign m0_bresp  = wr_resp_code[0];
+    assign m1_bvalid = wr_resp_valid[1];
+    assign m1_bresp  = wr_resp_code[1];
+    assign m2_bvalid = wr_resp_valid[2];
+    assign m2_bresp  = wr_resp_code[2];
+
+    // =========================================================================
+    // Read Response Back to Masters
+    // =========================================================================
+    logic rd_resp_valid [0:2];
+    logic [DATA_WIDTH-1:0] rd_resp_data [0:2];
+    logic [1:0] rd_resp_code [0:2];
+
+    always_ff @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            for (int i = 0; i < 3; i++) begin
+                rd_resp_valid[i] <= 1'b0;
+                rd_resp_data[i]  <= {DATA_WIDTH{1'b0}};
+                rd_resp_code[i]  <= 2'b00;
+            end
+        end else begin
+            for (int i = 0; i < 3; i++) begin
+                if (rd_active[i] && s_ack) begin
+                    rd_resp_valid[i] <= 1'b1;
+                    rd_resp_data[i]  <= rd_decode_ok ? s_rdata : {DATA_WIDTH{1'b0}};
+                    rd_resp_code[i]  <= rd_decode_ok ? RESP_OKAY : RESP_DECERR;
+                end else if (rd_resp_valid[i]) begin
+                    case (i)
+                        0: if (m0_rready) rd_resp_valid[i] <= 1'b0;
+                        1: if (m1_rready) rd_resp_valid[i] <= 1'b0;
+                        2: if (m2_rready) rd_resp_valid[i] <= 1'b0;
+                        default: rd_resp_valid[i] <= 1'b0;
+                    endcase
+                end
+            end
+        end
+    end
+
+    assign m0_rvalid = rd_resp_valid[0];
+    assign m0_rdata  = rd_resp_data[0];
+    assign m0_rresp  = rd_resp_code[0];
+    assign m1_rvalid = rd_resp_valid[1];
+    assign m1_rdata  = rd_resp_data[1];
+    assign m1_rresp  = rd_resp_code[1];
+    assign m2_rvalid = rd_resp_valid[2];
+    assign m2_rdata  = rd_resp_data[2];
+    assign m2_rresp  = rd_resp_code[2];
+
+    // =========================================================================
+    // Debug Counters
+    // =========================================================================
+    // Stall counter: any cycle where a request is pending but blocked
+    logic arb_stall;
+    assign arb_stall = (wr_pend[1] & wr_active[0]) |  // M1 stalled by M0
+                       (wr_pend[2] & (wr_active[0] | wr_active[1])) |
+                       (rd_pend[1] & rd_active[0]) |
+                       (rd_pend[2] & (rd_active[0] | rd_active[1]));
+
+    always_ff @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            dbg_m0_wr_count    <= 32'd0;
+            dbg_m0_rd_count    <= 32'd0;
+            dbg_m1_wr_count    <= 32'd0;
+            dbg_m1_rd_count    <= 32'd0;
+            dbg_m2_wr_count    <= 32'd0;
+            dbg_m2_rd_count    <= 32'd0;
+            dbg_arb_stall_count<= 32'd0;
+            dbg_error_flags    <= 8'd0;
+        end else begin
+            if (wr_active[0] && s_ack) dbg_m0_wr_count <= dbg_m0_wr_count + 1;
+            if (rd_active[0] && s_ack) dbg_m0_rd_count <= dbg_m0_rd_count + 1;
+            if (wr_active[1] && s_ack) dbg_m1_wr_count <= dbg_m1_wr_count + 1;
+            if (rd_active[1] && s_ack) dbg_m1_rd_count <= dbg_m1_rd_count + 1;
+            if (wr_active[2] && s_ack) dbg_m2_wr_count <= dbg_m2_wr_count + 1;
+            if (rd_active[2] && s_ack) dbg_m2_rd_count <= dbg_m2_rd_count + 1;
+            if (arb_stall)             dbg_arb_stall_count <= dbg_arb_stall_count + 1;
+
+            // Error flag: decode error on write [3:0] = per-master sticky
+            if (wr_active[0] && s_ack && !wr_decode_ok) dbg_error_flags[0] <= 1'b1;
+            if (wr_active[1] && s_ack && !wr_decode_ok) dbg_error_flags[1] <= 1'b1;
+            if (wr_active[2] && s_ack && !wr_decode_ok) dbg_error_flags[2] <= 1'b1;
+            // Error flag: decode error on read [7:4]
+            if (rd_active[0] && s_ack && !rd_decode_ok) dbg_error_flags[4] <= 1'b1;
+            if (rd_active[1] && s_ack && !rd_decode_ok) dbg_error_flags[5] <= 1'b1;
+            if (rd_active[2] && s_ack && !rd_decode_ok) dbg_error_flags[6] <= 1'b1;
+        end
+    end
 
 endmodule
-
-`default_nettype wire
+// =============================================================================
+// END: axi_interconnect.sv
+// =============================================================================
