@@ -1,0 +1,36 @@
+// =============================================================================
+// Project:     NeuroRV Edge
+// File:        memory_init.mem
+// Format:      Verilog Hexadecimal (Readmemb/Readmemh compatible)
+// Description: Initial Boot Image loaded directly into internal Block RAMs.
+//              Contains a jump vector, clear registers, and a tiny hardware
+//              diagnostic loop to flash LEDs and write "N_RV" to UART.
+// Address:     0x00000000 to 0x0000002F (32-bit words)
+// =============================================================================
+
+// 1. Reset Vector Hook: Jump to main execution space (0x00000010)
+00000093 // x1  = 0 (nop)
+00c0006f // jal x0, 0x10 (jump to address 0x10)
+00000093 // x3  = 0 (nop padding)
+00000093 // x4  = 0 (nop padding)
+
+// 2. Initial Setup: Base Peripherals Addresses
+// Base GPIO = 0x80000000, Base UART = 0x80001000
+800002b7 // x5 = 0x80000000 (lui x5, 0x80000)
+80001337 // x6 = 0x80001000 (lui x6, 0x80001)
+0ff00393 // x7 = 255 (li x7, 255 - LED bitmask)
+
+// 3. Execution Main loop (Address 0x1C)
+0072a023 // sw x7, 0(x5)      -> Write 0xFF to GPIO outputs (Turn all LEDs ON)
+04e00413 // li x8, 0x4E       -> ASCII 'N'
+00832023 // sw x8, 0(x6)      -> Write 'N' to UART TX FIFO
+05f00413 // li x8, 0x5F       -> ASCII '_'
+00832023 // sw x8, 0(x6)      -> Write '_' to UART TX FIFO
+05200413 // li x8, 0x52       -> ASCII 'R'
+00832023 // sw x8, 0(x6)      -> Write 'R' to UART TX FIFO
+05600413 // li x8, 0x56       -> ASCII 'V'
+00832023 // sw x8, 0(x6)      -> Write 'V' to UART TX FIFO
+
+// 4. Infinite End Loop (Address 0x40)
+00000093 // nop
+fe00006f // jal x0, 0x40 (Jump back to itself, waiting for main firmware upload)
