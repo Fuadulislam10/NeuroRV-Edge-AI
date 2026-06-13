@@ -22,3 +22,20 @@ This test plan defines the validation procedures for confirming structural integ
 1. Compile the target testing infrastructure using the cross-compiler toolset:
    ```bash
    riscv32-unknown-elf-gcc -O2 -march=rv32im -mabi=ilp32 -nostartfiles -T link.ld ../../firmware/examples/gpio_blink.c -o gpio_blink.elf
+
+---
+
+1. Convert the compiled elf layout binary into a standard memory layout execution array image file.
+
+2. Flash the target layout update to the development platform board.
+
+3. Verify that the on-board user LEDs match the target output sequence pattern (0x55 toggling with 0xAA). Adjust the hardware slide switches to confirm that the internal delay calculation dynamically updates.
+
+Executing VAL-005 (Co-Processor Execution Testing)
+This step exercises the vector pipeline arrays, vector register file structures, and parallel mathematical elements.
+
+1. Deploy vxu_demo.c to the execution space.
+
+2. Monitor the physical hardware LEDs.
+
+3. If the vector math processing checks execute successfully, the core drives the validation status token 0xAA (binary 10101010) directly across the user LEDs. If a mathematical or processing fault occurs, the status LEDs will display 0xFF, indicating a failure.
