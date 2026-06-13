@@ -18,3 +18,20 @@ Navigate into the structural automation script workspace and trigger the deploym
 cd scripts/fpga
 chmod +x *.sh
 ./build.sh
+
+---
+
+This processes the underlying modules, maps system components, paths input nets, constructs internal hardware block RAMs, and structures the final binary image package at `synthesis/fpga/build_output/neurorv_edge.bit.`
+
+### 2. Connect and Prepare Physical Infrastructure
+Connect micro-USB lines directly to the board's JTAG/UART port connection.
+
+Ensure slide switches (switches[7:0]) are set to their baseline positions.
+
+Check that the board's power jumper configuration matches raw USB power source feeds.
+
+Flip the master hardware power slide switch to the ON position.
+
+3. Flash Hardware Design Configuration
+Execute the automated JTAG programming tool wrapper:
+./program.sh
